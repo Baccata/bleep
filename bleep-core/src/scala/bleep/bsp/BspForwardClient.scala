@@ -2,7 +2,7 @@ package bleep.bsp
 
 import ch.epfl.scala.bsp4j
 
-class BspForwardClient(var forwardToOpt: Option[bsp4j.BuildClient]) extends bsp4j.BuildClient {
+class BspForwardClient(var forwardToOpt: Option[bsp4j.BuildClient], logger: bleep.logging.Logger) extends bsp4j.BuildClient {
   override def onBuildLogMessage(params: bsp4j.LogMessageParams): Unit =
     forwardToOpt.foreach(_.onBuildLogMessage(params))
   override def onBuildPublishDiagnostics(params: bsp4j.PublishDiagnosticsParams): Unit =

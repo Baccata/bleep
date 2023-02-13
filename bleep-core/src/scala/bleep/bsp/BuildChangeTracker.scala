@@ -14,6 +14,9 @@ import ch.epfl.scala.bsp4j.BuildTargetIdentifier
 import ch.epfl.scala.bsp4j.BuildTargetEventKind
 import scala.jdk.CollectionConverters._
 import ch.epfl.scala.bsp4j.BuildClient
+import bloop.config.Config
+import scala.collection.SortedMap
+import bleep.model.CrossProjectName
 
 trait BuildChangeTracker {
   def ensureBloopUpToDate(): Either[BleepException, Started]
@@ -25,7 +28,7 @@ object BuildChangeTracker {
   def make(pre: Prebootstrapped, buildClient: BuildClient): BuildChangeTracker =
     new Impl(new AtomicReference[State](load(pre)), buildClient)
 
-  case class State(pre: Prebootstrapped, maybeStarted: Either[BleepException, Started])
+  case class State(pre: Prebootstrapped, maybeStarted: Either[BleepException, Started], bloopProjects: SortedMap[CrossProjectName, Config.Project])
   private class Impl(atomicState: AtomicReference[State], buildClient: BuildClient) extends BuildChangeTracker {
     def apply[A](f: => A): A = {
       ensureBloopUpToDate()
@@ -33,18 +36,17 @@ object BuildChangeTracker {
     }
 
     def ensureBloopUpToDate(): Either[BleepException, Started] =
-      atomicState.updateAndGet { state =>
-        import state.pre
+      atomicState.updateAndGet { currentState =>
+        import currentState.pre
         if (pre.isOutdated()) {
-          val result = load(pre)
-          state.maybeStarted.foreach { before =>
-            result.maybeStarted.foreach { after =>
-              val changes = computeBuildTargetChanges(before, after)
-              buildClient.onBuildTargetDidChange(changes)
-            }
-          }
-          result
-        } else state
+          pre.logger.info("PRE WAS OUTDATED")
+          val newState = load(pre)
+          val changes = computeBuildTargetChanges(currentState, newState, pre.logger)
+          pre.logger.info(changes.toString())
+          buildClient.onBuildTargetDidChange(changes)
+          pre.logger.info("client notified")
+          newState
+        } else currentState
       }.maybeStarted
   }
 
@@ -64,35 +66,46 @@ object BuildChangeTracker {
       }
     }
     maybeStarted match {
-      case Left(e)                  => State(pre, Left(e))
-      case Right((newPre, started)) => State(newPre, Right(started))
+      case Left(e)                  => State(pre, Left(e), SortedMap.empty)
+      case Right((newPre, started)) => State(newPre, Right(started), started.bloopProjects)
     }
   }
 
-  private def computeBuildTargetChanges(before: Started, after: Started): DidChangeBuildTarget = {
+  private def id(proj: Config.Project): BuildTargetIdentifier = {
+    val id = proj.directory.toUri.toASCIIString.stripSuffix("/") + "/?id=" + proj.name
+    // trying to apply the same format as bloop
+    val amended = id.replace("file:///", "file:/")
+    new BuildTargetIdentifier(amended)
+  }
+
+  private def computeBuildTargetChanges(before: State, after: State, logger: bleep.logging.Logger): DidChangeBuildTarget = {
     val changedAndDeleted = before.bloopProjects.flatMap { case (cross, beforeProj) =>
       after.bloopProjects.get(cross) match {
         case Some(afterProj) if beforeProj == afterProj =>
+          logger.info("*" * 30)
+          beforeProj.classpath.foreach(logger.info(_))
+          logger.info("*" * 30)
+          afterProj.classpath.foreach(logger.info(_))
           None
         case Some(_) =>
           Some {
-            val event = new BuildTargetEvent(new BuildTargetIdentifier(cross.value))
+            val event = new BuildTargetEvent(id(beforeProj))
             event.setKind(BuildTargetEventKind.CHANGED)
             event
           }
         case None =>
           Some {
-            val event = new BuildTargetEvent(new BuildTargetIdentifier(cross.value))
+            val event = new BuildTargetEvent(id(beforeProj))
             event.setKind(BuildTargetEventKind.DELETED)
             event
           }
       }
     }
-    val added = after.bloopProjects.flatMap { case (cross, _) =>
+    val added = after.bloopProjects.flatMap { case (cross, afterProj) =>
       before.bloopProjects.get(cross) match {
         case None =>
           Some {
-            val event = new BuildTargetEvent(new BuildTargetIdentifier(cross.value))
+            val event = new BuildTargetEvent(id(afterProj))
             event.setKind(BuildTargetEventKind.CREATED)
             event
           }
